@@ -1,0 +1,64 @@
+name: Build unsigned IPA
+on:
+  workflow_dispatch:
+  push:
+    branches: [ main ]
+jobs:
+  build:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Select newest Xcode (26.4+ required for the CarPlay video APIs)
+        run: |
+          echo "Available Xcodes:"
+          ls -d /Applications/Xcode*.app 2>/dev/null || true
+          NEWEST=$(ls -d /Applications/Xcode*.app 2>/dev/null | sort -V | tail -n 1)
+          if [ -z "$NEWEST" ]; then echo "ERROR: no Xcode found on runner"; exit 1; fi
+          echo "Selecting newest Xcode: $NEWEST"
+          sudo xcode-select -s "$NEWEST/Contents/Developer"
+          xcodebuild -version
+          VER=$(xcodebuild -version | head -n 1 | awk '{print $2}')
+          MAJOR=${VER%%.*}
+          MINOR=${VER#*.}
+          MINOR=${MINOR%%.*}
+          if [ "$MAJOR" -lt 26 ] || { [ "$MAJOR" -eq 26 ] && [ "$MINOR" -lt 4 ]; }; then
+            echo "ERROR: CarPlay Pro needs Xcode 26.4+ (CarPlay video APIs: CPPlaybackConfiguration, CPSessionConfiguration.supportsVideoPlayback). Runner has Xcode $VER."
+            exit 1
+          fi
+
+      - name: Unzip project
+        run: |
+          unzip -o carplay-pro.zip
+          ls -la carplay-pro
+
+      - name: Validate project
+        run: |
+          cd carplay-pro
+          plutil -lint CarPlayPro.xcodeproj/project.pbxproj
+          plutil -lint CarPlayPro/Info.plist
+          plutil -lint CarPlayPro/CarPlayPro.entitlements
+          xcodebuild -list -project CarPlayPro.xcodeproj
+
+      - name: Build app (no signing)
+        run: |
+          cd carplay-pro
+          xcodebuild -project CarPlayPro.xcodeproj -scheme CarPlayPro -configuration Release -sdk iphoneos CODE_SIGNING_ALLOWED=NO CODE_SIGN_IDENTITY="" CODE_SIGNING_REQUIRED=NO -derivedDataPath DerivedData
+
+      - name: Package IPA
+        run: |
+          cd carplay-pro
+          APP=$(find DerivedData/Build/Products/Release-iphoneos -maxdepth 1 -name "*.app" | head -n 1)
+          if [ -z "$APP" ]; then APP=$(find ~/Library/Developer/Xcode/DerivedData -name "CarPlayPro.app" -path "*Release-iphoneos*" | head -n 1); fi
+          test -n "$APP" || { echo "ERROR: no .app found in DerivedData"; find DerivedData -maxdepth 4 -type d | head -20; exit 1; }
+          echo "APP=$APP"
+          mkdir -p Payload
+          cp -r "$APP" Payload/
+          zip -r ../CarPlayPro-unsigned.ipa Payload
+          ls -lh ../CarPlayPro-unsigned.ipa
+
+      - name: Upload IPA
+        uses: actions/upload-artifact@v4
+        with:
+          name: CarPlayPro-unsigned-ipa
+          path: CarPlayPro-unsigned.ipa
